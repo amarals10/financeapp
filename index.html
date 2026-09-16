@@ -134,8 +134,8 @@ h2{font-size:16px;margin:0 0 8px}
 //  Use SOMENTE a chave pública (anon public ou publishable).
 //  NUNCA cole aqui a chave service_role / secret.
 // =====================================================================
-const SUPABASE_URL = "https://silusoqcfnzfojzyrdou.supabase.co";   // <-- troque pela sua Project URL
-const SUPABASE_ANON_KEY = "sb_publishable_aE-DLW356UjCZX1QMHk3Zg_tjGE2WPb";          // <-- troque pela sua anon key
+const SUPABASE_URL = "https://SEU-PROJETO.supabase.co";   // <-- troque pela sua Project URL
+const SUPABASE_ANON_KEY = "COLE-AQUI-A-ANON-KEY";          // <-- troque pela sua anon key
 // =====================================================================
 
 const CATS = {
@@ -150,7 +150,10 @@ const CATS = {
     {id:'jogos', nome:'Jogos', icone:'🎮'},
     {id:'manut_carro', nome:'Manut. carro', icone:'🔧'},
     {id:'presentes', nome:'Presentes', icone:'🎁'},
-    {id:'outros', nome:'Outros', icone:'📦'}
+    {id:'dividas', nome:'Dívidas', icone:'🏦'},
+    {id:'financiamentos', nome:'Financiamentos', icone:'🚗'},
+    {id:'outros', nome:'Outros', icone:'📦'},
+    {id:'a_classificar', nome:'A classificar', icone:'🏷️'}
   ],
   receita: [
     {id:'salario', nome:'Salário', icone:'💼'},
@@ -162,6 +165,7 @@ const CARTOES_PADRAO = [
   {nome:'Nubank', cor:'#820AD1'}, {nome:'Sicoob', cor:'#00A091'},
   {nome:'Itaú', cor:'#EC7000'}, {nome:'Mercado Pago', cor:'#00B1EA'}
 ];
+const CATS_COMPROMISSO = ['dividas','financiamentos'];
 const NIVEIS = ['Iniciante','Anotador','Constante','Organizado','Controlado','Estrategista','Planejador','Mestre das finanças'];
 const MESES = ['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
 
@@ -188,6 +192,7 @@ function addMeses(s, n){ const d = parse(s); return iso(new Date(d.getFullYear()
 function addDias(s, n){ const d = parse(s); d.setDate(d.getDate()+n); return iso(d); }
 function diasNoMes(y, m0){ return new Date(y, m0+1, 0).getDate(); }
 function dataNoMes(mesIso, dia){ const d = parse(mesIso), y = d.getFullYear(), m = d.getMonth(); return iso(new Date(y, m, Math.min(dia, diasNoMes(y, m)))); }
+function mesesEntre(a, b){ const x = parse(a), y = parse(b); return (y.getFullYear()-x.getFullYear())*12 + y.getMonth()-x.getMonth(); }
 function difDias(a, b){ return Math.round((parse(b) - parse(a)) / 86400000); }
 function localData(ts){ return iso(new Date(ts)); }
 function segundaDaSemana(s){ const d = parse(s); d.setDate(d.getDate() - ((d.getDay()+6)%7)); return iso(d); }
@@ -288,7 +293,8 @@ function linhaCartao(c){
 function linhaLanc(l){
   return {id:l.id, user_id:sessao.user.id, tipo:l.tipo, valor:Number(l.valor), categoria:l.categoria, cartao_id:l.cartao_id||null,
     data_compra:l.data_compra, mes_ref:l.mes_ref, descricao:l.descricao||null, parcela_num:l.parcela_num||1,
-    parcelas_total:l.parcelas_total||1, grupo_id:l.grupo_id||null, criado_em:l.criado_em||new Date().toISOString()};
+    parcelas_total:l.parcelas_total||1, grupo_id:l.grupo_id||null, criado_em:l.criado_em||new Date().toISOString(),
+    origem:l.origem||'app', lote:l.lote||null, previsto:!!l.previsto};
 }
 function criarCartoesPadrao(){
   dados.cartoes = CARTOES_PADRAO.map((c,i) => ({id:uuid(), nome:c.nome, cor:c.cor, ordem:i, dia_fechamento:null, dia_vencimento:null, ativo:true}));
@@ -342,8 +348,8 @@ function calcOrdemCats(){
   const lim = addDias(hojeISO(), -90), out = {};
   for (const t of ['despesa','receita']){
     const cont = {};
-    dados.lancamentos.forEach(l => { if (l.tipo === t && l.data_compra >= lim && l.parcela_num === 1) cont[l.categoria] = (cont[l.categoria]||0) + 1; });
-    out[t] = CATS[t].map((c,i) => ({c, i, n:(c.id === 'outros' || c.id === 'outras_receitas') ? -1 : (cont[c.id]||0)}))
+    dados.lancamentos.forEach(l => { if (l.tipo === t && (l.origem||'app') === 'app' && l.data_compra >= lim && l.parcela_num === 1) cont[l.categoria] = (cont[l.categoria]||0) + 1; });
+    out[t] = CATS[t].map((c,i) => ({c, i, n:c.id === 'a_classificar' ? -2 : (c.id === 'outros' || c.id === 'outras_receitas') ? -1 : (cont[c.id]||0)}))
       .sort((a,b) => b.n - a.n || a.i - b.i).map(x => x.c.id);
   }
   return out;
@@ -353,10 +359,17 @@ function calcOrdemCats(){
 const ui = {aba:'lancar', tipo:'despesa', centavos:0, categoria:null, meio:prefs.ultimoMeio||'pix', detalhes:false,
   data:hojeISO(), desc:'', parcelas:1, mesInd:mesDe(hojeISO()), mesHist:mesDe(hojeISO()), modal:null, fatura:null, ordemCats:null, edit:null};
 
+// Custo de vida e provisão importados (previsto=true) funcionam como orçamento:
+// não somam nas despesas; os gastos do dia a dia lançados no app consomem esse valor.
 function resumoMes(m){
   const ls = dados.lancamentos.filter(l => l.mes_ref === m);
-  const desp = soma(ls.filter(l => l.tipo === 'despesa')), rec = soma(ls.filter(l => l.tipo === 'receita'));
-  return {desp, rec, saldo:rec-desp, ls};
+  const despesas = ls.filter(l => l.tipo === 'despesa');
+  const desp = soma(despesas.filter(l => !l.previsto));
+  const prev = soma(despesas.filter(l => l.previsto));
+  const dia = soma(despesas.filter(l => !l.previsto && (l.origem||'app') === 'app' && !CATS_COMPROMISSO.includes(l.categoria)));
+  const rest = m >= mesDe(hojeISO()) ? Math.max(0, prev - dia) : 0;
+  const rec = soma(ls.filter(l => l.tipo === 'receita'));
+  return {desp, rec, prev, dia, rest, saldo:rec - desp - rest, ls};
 }
 
 // ---------- telas ----------
@@ -382,7 +395,7 @@ function itemHTML(l){
   const meio = l.tipo === 'receita' ? 'Receita' : nomeMeio(l.cartao_id);
   const parc = l.parcelas_total > 1 ? ` ${l.parcela_num}/${l.parcelas_total}` : '';
   const sub = [l.descricao, meio+parc, fmtDia(l.data_compra)].filter(Boolean).map(esc).join(', ');
-  return `<div class="item" data-a="item" data-v="${l.id}"><div class="ic">${c.icone}</div><div class="tx"><div>${esc(c.nome)}</div><small>${sub}</small></div><div class="v ${l.tipo==='receita'?'rec':''}">${l.tipo==='receita'?'+ ':''}${fmt(l.valor)}</div></div>`;
+  return `<div class="item" data-a="item" data-v="${l.id}"><div class="ic">${c.icone}</div><div class="tx"><div>${esc(c.nome)}${l.previsto?' <span class="tag">previsto</span>':''}</div><small>${sub}</small></div><div class="v ${l.tipo==='receita'?'rec':''}">${l.tipo==='receita'?'+ ':''}${fmt(l.valor)}</div></div>`;
 }
 
 function telaLancar(g){
@@ -471,35 +484,68 @@ function telaCartoes(){
   return h;
 }
 
+function paretoSVG(cats, tot){
+  const W = 340, H = 205, L = 6, R = 34, T = 12, B = 32, ch = H - T - B, bw = (W - L - R) / cats.length, max = cats[0][1];
+  let acc = 0, barras = '', icones = '', pts = [];
+  cats.forEach(([k,v], i) => {
+    const c = catInfo('despesa', k), x = L + i*bw, alt = Math.max(1, v/max*ch), cx = x + bw/2;
+    barras += `<rect x="${(x+bw*.14).toFixed(1)}" y="${(T+ch-alt).toFixed(1)}" width="${(bw*.72).toFixed(1)}" height="${alt.toFixed(1)}" rx="3" fill="${k==='a_classificar'?'#C9BFAE':'#B6653B'}"><title>${esc(c.nome)}: ${fmt(v)}</title></rect>`;
+    icones += `<text x="${cx.toFixed(1)}" y="${H-10}" text-anchor="middle" font-size="${bw < 24 ? 11 : 15}">${c.icone}</text>`;
+    acc += v; pts.push([cx, T + ch*(1 - acc/tot)]);
+  });
+  const eixo = [0,50,80,100].map(p => `<text x="${W-R+5}" y="${(T+ch*(1-p/100)+4).toFixed(1)}" font-size="10" fill="#6F746D">${p}%</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Pareto das despesas" style="display:block;margin:10px 0 8px">
+    <line x1="${L}" x2="${W-R}" y1="${T+ch}" y2="${T+ch}" stroke="#E2DACB"/>
+    <line x1="${L}" x2="${W-R}" y1="${(T+ch*.2).toFixed(1)}" y2="${(T+ch*.2).toFixed(1)}" stroke="#173F35" stroke-dasharray="3 3" opacity=".35"/>
+    ${barras}
+    <polyline points="${pts.map(p => p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}" fill="none" stroke="#173F35" stroke-width="2"/>
+    ${pts.map(p => `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="#173F35"/>`).join('')}
+    ${eixo}${icones}</svg>`;
+}
+
 function telaIndicadores(){
   const m = ui.mesInd, hoje = hojeISO(), mesAtual = mesDe(hoje);
   const r = resumoMes(m), ra = resumoMes(addMeses(m,-1));
-  const despM = r.ls.filter(l => l.tipo === 'despesa');
+  const despM = r.ls.filter(l => l.tipo === 'despesa' && !l.previsto);
   let h = navMes('mesInd', m);
   const varD = ra.desp > 0 ? (r.desp - ra.desp) / ra.desp * 100 : null;
   const poup = r.rec > 0 ? r.saldo / r.rec * 100 : null;
   h += `<div class="kpis">
     <div class="kpi"><span>Despesas</span><strong>${fmt(r.desp)}</strong>${varD===null?'':`<small style="color:${varD>0?'var(--terra)':'var(--ok)'}">${varD>0?'▲':'▼'} ${Math.abs(varD).toFixed(0)}% vs mês anterior</small>`}</div>
     <div class="kpi"><span>Receitas</span><strong>${fmt(r.rec)}</strong></div>
-    <div class="kpi"><span>Saldo</span><strong style="color:${r.saldo<0?'var(--erro)':'var(--ok)'}">${fmt(r.saldo)}</strong></div>
-    <div class="kpi"><span>Quanto sobrou da renda</span><strong>${poup===null?'—':poup.toFixed(0)+'%'}</strong></div></div>`;
+    <div class="kpi"><span>${r.rest ? 'Saldo previsto' : 'Saldo'}</span><strong style="color:${r.saldo<0?'var(--erro)':'var(--ok)'}">${fmt(r.saldo)}</strong>${r.rest?`<small class="muted">já desconta ${fmt(r.rest)} de orçamento</small>`:''}</div>
+    <div class="kpi"><span>Quanto sobra da renda</span><strong>${poup===null?'—':poup.toFixed(0)+'%'}</strong></div></div>`;
+
+  if (r.prev > 0){
+    const pct = r.dia / r.prev * 100, estourou = r.dia > r.prev;
+    h += `<div class="card"><h2>Orçamento do dia a dia</h2>
+      <div class="lin"><span>${fmt(r.dia)} gastos de ${fmt(r.prev)} previstos</span><strong>${pct.toFixed(0)}%</strong></div>
+      <div class="bar"><i style="width:${Math.min(100,pct)}%;background:${estourou?'var(--erro)':'var(--verde)'}"></i></div>
+      <div class="muted">${estourou ? `Passou ${fmt(r.dia - r.prev)} do previsto.` : `Ainda cabem ${fmt(r.prev - r.dia)} neste mês.`} Custo de vida e provisão da planilha são o orçamento; os gastos lançados no app vão consumindo esse valor.</div></div>`;
+  }
   if (m === mesAtual){
     const d = parse(hoje), dh = d.getDate(), dm = diasNoMes(d.getFullYear(), d.getMonth());
-    const compras = soma(dados.lancamentos.filter(l => l.tipo === 'despesa' && l.data_compra.slice(0,7) === hoje.slice(0,7)));
+    const compras = soma(dados.lancamentos.filter(l => l.tipo === 'despesa' && !l.previsto && (l.origem||'app') === 'app' && l.data_compra.slice(0,7) === hoje.slice(0,7)));
     h += `<div class="card"><h2>Ritmo de compras</h2><div class="muted">${fmt(compras)} em compras nos primeiros ${dh} dias. Nesse ritmo, o mês termina com cerca de <b>${fmt(compras/dh*dm)}</b> em compras.</div></div>`;
   }
-  if (!despM.length && !r.rec){ return h + `<div class="card muted">Nenhum lançamento neste mês. Registre na aba Lançar e os indicadores aparecem aqui.</div>`; }
-  const cats = agrupar(despM, l => l.categoria), maxC = cats.length ? cats[0][1] : 1;
-  h += `<div class="card"><h2>Despesas por categoria</h2>${cats.map(([k,v]) => { const c = catInfo('despesa',k);
-    return `<div class="lin"><span>${c.icone} ${esc(c.nome)}</span><strong>${fmt(v)} <span class="muted">${(v/r.desp*100).toFixed(0)}%</span></strong></div><div class="bar"><i style="width:${v/maxC*100}%"></i></div>`; }).join('') || '<div class="muted">Sem despesas.</div>'}</div>`;
-  const meios = agrupar(despM, l => l.cartao_id || '');
-  if (meios.length) h += `<div class="card"><h2>Despesas por forma de pagamento</h2>${meios.map(([k,v]) => `<div class="lin" style="padding:5px 0"><span>${esc(nomeMeio(k||null))}</span><strong>${fmt(v)}</strong></div>`).join('')}</div>`;
-  const futuras = soma(dados.lancamentos.filter(l => l.tipo === 'despesa' && l.parcelas_total > 1 && l.mes_ref > mesAtual));
-  h += `<div class="card"><div class="lin"><span><b>Parcelas já assumidas</b><div class="muted">Soma das parcelas dos próximos meses</div></span><strong>${fmt(futuras)}</strong></div></div>`;
+  if (!despM.length && !r.rec && !r.prev){ return h + `<div class="card muted">Nenhum lançamento neste mês. Registre na aba Lançar e os indicadores aparecem aqui.</div>`; }
+
+  if (despM.length){
+    const cats = agrupar(despM, l => l.categoria), tot = soma(despM);
+    let acc = 0;
+    h += `<div class="card"><h2>Pareto das despesas</h2><div class="muted">Categorias da maior para a menor. A linha mostra o acumulado; a tracejada marca 80%.</div>
+      ${paretoSVG(cats, tot)}
+      ${cats.map(([k,v]) => { acc += v; const c = catInfo('despesa',k);
+        return `<div class="lin" style="padding:6px 0;border-top:1px solid var(--linha)"><span>${c.icone} ${esc(c.nome)}</span><strong>${fmt(v)} <span class="muted">${(v/tot*100).toFixed(0)}%, acumulado ${(acc/tot*100).toFixed(0)}%</span></strong></div>`; }).join('')}</div>`;
+    const meios = agrupar(despM, l => l.cartao_id || '');
+    h += `<div class="card"><h2>Despesas por forma de pagamento</h2>${meios.map(([k,v]) => `<div class="lin" style="padding:5px 0"><span>${esc(nomeMeio(k||null))}</span><strong>${fmt(v)}</strong></div>`).join('')}</div>`;
+  }
+  const futuras = soma(dados.lancamentos.filter(l => l.tipo === 'despesa' && !l.previsto && l.mes_ref > mesAtual));
+  h += `<div class="card"><div class="lin"><span><b>Compromissos já assumidos</b><div class="muted">Faturas, parcelas e dívidas dos próximos meses</div></span><strong>${fmt(futuras)}</strong></div></div>`;
   const ms = [-5,-4,-3,-2,-1,0].map(i => addMeses(m, i)), rs = ms.map(resumoMes);
-  const mx = Math.max(1, ...rs.map(x => Math.max(x.desp, x.rec)));
-  h += `<div class="card"><h2>Últimos 6 meses</h2><div class="chart">${ms.map((mm,i) => `<div class="col"><div class="bars"><i style="height:${rs[i].rec/mx*100}%;background:var(--ok)" title="Receitas ${fmt(rs[i].rec)}"></i><i style="height:${rs[i].desp/mx*100}%;background:var(--terra)" title="Despesas ${fmt(rs[i].desp)}"></i></div><small>${nomeMesCurto(mm)}</small></div>`).join('')}</div>
-    <div class="leg"><span><i style="background:var(--ok)"></i>Receitas</span><span><i style="background:var(--terra)"></i>Despesas</span></div></div>`;
+  const mx = Math.max(1, ...rs.map(x => Math.max(x.desp + x.rest, x.rec)));
+  h += `<div class="card"><h2>Últimos 6 meses</h2><div class="chart">${ms.map((mm,i) => `<div class="col"><div class="bars"><i style="height:${rs[i].rec/mx*100}%;background:var(--ok)" title="Receitas ${fmt(rs[i].rec)}"></i><i style="height:${(rs[i].desp+rs[i].rest)/mx*100}%;background:var(--terra)" title="Despesas ${fmt(rs[i].desp+rs[i].rest)}"></i></div><small>${nomeMesCurto(mm)}</small></div>`).join('')}</div>
+    <div class="leg"><span><i style="background:var(--ok)"></i>Receitas</span><span><i style="background:var(--terra)"></i>Despesas e orçamento</span></div></div>`;
   return h;
 }
 
@@ -528,7 +574,7 @@ function telaAjustes(){
     <div class="lin" style="margin-top:6px"><span>Última sincronização</span><strong>${prefs.ultimaSync ? new Date(prefs.ultimaSync).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'}) : '—'}</strong></div>
     ${sync.erro ? `<div class="erro">${esc(sync.erro)}</div>` : ''}
     <button class="btn small" data-a="sync">Sincronizar agora</button></div>`;
-  h += `<div class="card"><h2>Cartões</h2><div class="muted" style="margin-bottom:10px">Dia de fechamento e de vencimento de cada fatura. Ao mudar as datas, as compras já lançadas são reorganizadas nas faturas certas.</div>`;
+  h += `<div class="card"><h2>Cartões</h2><div class="muted" style="margin-bottom:10px">Dia de fechamento e de vencimento de cada fatura. Ao mudar as datas, as compras lançadas no app são reorganizadas nas faturas certas. Faturas importadas da planilha ficam no mês original.</div>`;
   for (const c of cartoesAtivos()){
     h += `<div class="row3"><div><label>Nome</label><input data-cfg="nome" data-id="${c.id}" value="${esc(c.nome)}"></div>
       <div><label>Fecha dia</label><input data-cfg="fech" data-id="${c.id}" type="number" inputmode="numeric" min="1" max="31" value="${c.dia_fechamento||''}"></div>
@@ -622,7 +668,10 @@ const acoes = {
     const ed = ui.edit;
     const cartao = t === 'despesa' && ui.meio !== 'pix' ? dados.cartoes.find(c => c.id === ui.meio) : null;
     const n = cartao ? ui.parcelas : 1, data = ui.data || hojeISO();
-    const base = cartao ? mesFatura(data, cartao) : mesDe(data);
+    const importado = ed && ed.origem !== 'app';
+    const base = importado
+      ? (cartao ? addMeses(ed.mesBase, mesesEntre(ed.dataOrig, data)) : mesDe(data))
+      : (cartao ? mesFatura(data, cartao) : mesDe(data));
     const por = Math.floor(total/n), resto = total - por*n;
     const grupo = n > 1 ? ((ed && ed.grupo) || uuid()) : null;
     const criado = ed ? ed.criado_em : new Date().toISOString();
@@ -630,7 +679,8 @@ const acoes = {
     const linhas = [];
     for (let i = 0; i < n; i++) linhas.push({id:reaproveita ? ed.ids[0] : uuid(), user_id:sessao.user.id, tipo:t, valor:(por + (i===0?resto:0))/100,
       categoria:ui.categoria, cartao_id:cartao ? cartao.id : null, data_compra:data, mes_ref:addMeses(base,i), descricao:ui.desc.trim() || null,
-      parcela_num:i+1, parcelas_total:n, grupo_id:grupo, criado_em:criado});
+      parcela_num:i+1, parcelas_total:n, grupo_id:grupo, criado_em:criado,
+      origem:ed ? ed.origem : 'app', lote:ed ? ed.lote : null, previsto:ed ? ed.previsto : false});
     const antes = gamificacao();
     if (ed){
       dados.lancamentos = dados.lancamentos.filter(x => !ed.ids.includes(x.id));
@@ -653,7 +703,8 @@ const acoes = {
     const cents = completo ? grupo.reduce((s,x) => s + Math.round(Number(x.valor)*100), 0) : Math.round(Number(l.valor)*100)*(l.parcelas_total||1);
     Object.assign(ui, {tipo:l.tipo, centavos:cents, categoria:l.categoria, meio:l.cartao_id||'pix', data:l.data_compra,
       desc:l.descricao||'', parcelas:l.parcelas_total||1, detalhes:true, modal:null,
-      edit:{ids:grupo.map(x => x.id), grupo:l.grupo_id, criado_em:l.criado_em||new Date().toISOString(), voltar:ui.aba}});
+      edit:{ids:grupo.map(x => x.id), grupo:l.grupo_id, criado_em:l.criado_em||new Date().toISOString(), voltar:ui.aba,
+        origem:l.origem||'app', lote:l.lote||null, previsto:!!l.previsto, dataOrig:l.data_compra, mesBase:grupo.map(x => x.mes_ref).sort()[0]}});
     ui.aba = 'lancar'; render(true); window.scrollTo(0,0);
   },
   cancelarEdicao(){
@@ -703,7 +754,7 @@ const acoes = {
     }
     const afetados = [];
     for (const l of dados.lancamentos){
-      if (l.tipo !== 'despesa' || !mudaram.includes(l.cartao_id)) continue;
+      if (l.tipo !== 'despesa' || (l.origem||'app') !== 'app' || !mudaram.includes(l.cartao_id)) continue;
       const c = dados.cartoes.find(x => x.id === l.cartao_id);
       const novo = addMeses(mesFatura(l.data_compra, c), (l.parcela_num||1) - 1);
       if (novo !== l.mes_ref){ l.mes_ref = novo; afetados.push(l); }
